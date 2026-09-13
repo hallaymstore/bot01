@@ -1,6 +1,6 @@
 {
   "name": "test01uzbot-file-utility",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Telegram file utility bot for @Test01uzbot",
   "main": "index.js",
   "type": "commonjs",
@@ -9,7 +9,7 @@
     "check": "node --check index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "dependencies": {
     "archiver": "^7.0.1",
