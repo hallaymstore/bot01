@@ -55,6 +55,14 @@ function sizeText(bytes = 0) {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function cleanError(err) {
+  return String(err?.message || err || 'UNKNOWN').replaceAll(BOT_TOKEN, '[REDACTED]');
+}
+
 async function cleanDir(dir) {
   if (!dir) return;
   await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -114,6 +122,42 @@ async function downloadFile(ctx, meta, dir, index = 0) {
   if (buf.length > MAX_FILE_SIZE) throw new Error('FILE_TOO_LARGE');
   await fsp.writeFile(local, buf);
   return { ...meta, local, size: meta.size || buf.length };
+}
+
+async function sendDocumentRobust(ctx, filePath, filename, caption = '✅ Tayyor!') {
+  const data = await fsp.readFile(filePath);
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 45000);
+    try {
+      const form = new FormData();
+      form.append('chat_id', String(ctx.chat.id));
+      form.append('caption', caption);
+      form.append('document', new Blob([data]), filename);
+
+      const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, {
+        method: 'POST',
+        body: form,
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+
+      const result = await response.json().catch(() => null);
+      if (!response.ok || !result?.ok) {
+        throw new Error(`SEND_DOCUMENT_${response.status}_${result?.description || 'UNKNOWN'}`);
+      }
+      return result.result;
+    } catch (err) {
+      clearTimeout(timer);
+      lastError = err;
+      console.error(`sendDocument attempt ${attempt}/3: ${cleanError(err)}`);
+      if (attempt < 3) await sleep(1200 * attempt);
+    }
+  }
+
+  throw lastError || new Error('SEND_DOCUMENT_FAILED');
 }
 
 function mimeExt(mime = '') {
@@ -238,7 +282,8 @@ bot.command('done', async (ctx) => {
       await zipFiles(s.files, output);
       filename = 'fayllar.zip';
     }
-    await ctx.replyWithDocument({ source: output, filename }, { caption: '✅ Tayyor!' });
+
+    await sendDocumentRobust(ctx, output, filename, '✅ Tayyor!');
     stats.completed += 1;
     stats.byType[s.mode] += 1;
     await ctx.telegram.deleteMessage(ctx.chat.id, wait.message_id).catch(() => {});
@@ -246,7 +291,11 @@ bot.command('done', async (ctx) => {
     await sendMenu(ctx);
   } catch (err) {
     stats.errors += 1;
-    console.error('done error:', err);
+    const msg = cleanError(err);
+    console.error(`done error: ${msg}`);
+    if (msg.includes('SEND_DOCUMENT') || msg.includes('fetch failed') || msg.includes('abort')) {
+      return ctx.reply('⚠️ Fayl tayyor bo‘ldi, lekin Telegramga yuborishda tarmoq uzildi. /done ni yana bir marta bosing.');
+    }
     await ctx.reply('❌ Faylni qayta ishlashda xato yuz berdi. Fayl buzilgan yoki qo‘llab-quvvatlanmaydigan formatda bo‘lishi mumkin.');
   }
 });
@@ -337,7 +386,7 @@ bot.on(['document', 'photo'], async (ctx) => {
     await ctx.reply(`✅ Qabul qilindi (${s.files.length}/${MAX_FILES}): ${meta.name}\nYana yuboring yoki /done bosing.`);
   } catch (err) {
     stats.errors += 1;
-    console.error('file error:', err);
+    console.error(`file error: ${cleanError(err)}`);
     if (String(err.message) === 'FILE_TOO_LARGE') return ctx.reply(`❌ Fayl juda katta. Limit: ${sizeText(MAX_FILE_SIZE)}.`);
     return ctx.reply('❌ Faylni yuklab olishda xato bo‘ldi. Qayta urinib ko‘ring.');
   }
@@ -356,15 +405,15 @@ bot.on('text', async (ctx, next) => {
   try {
     const target = path.join(s.dir, newName);
     await fsp.copyFile(old.local, target);
-    await ctx.replyWithDocument({ source: target, filename: newName }, { caption: `✅ Yangi nom: ${newName}` });
+    await sendDocumentRobust(ctx, target, newName, `✅ Yangi nom: ${newName}`);
     stats.completed += 1;
     stats.byType.rename += 1;
     await resetSession(id);
     await sendMenu(ctx);
   } catch (err) {
     stats.errors += 1;
-    console.error('rename error:', err);
-    await ctx.reply('❌ Fayl nomini o‘zgartirishda xato bo‘ldi.');
+    console.error(`rename error: ${cleanError(err)}`);
+    await ctx.reply('❌ Fayl nomini o‘zgartirishda yoki yuborishda xato bo‘ldi. Qayta urinib ko‘ring.');
   }
 });
 
@@ -374,7 +423,7 @@ function escapeHtml(str = '') {
 
 bot.catch(async (err, ctx) => {
   stats.errors += 1;
-  console.error('bot error:', err);
+  console.error(`bot error: ${cleanError(err)}`);
   if (ctx?.chat?.id) await ctx.reply('⚠️ Kutilmagan xato yuz berdi. /start bilan qayta urinib ko‘ring.').catch(() => {});
 });
 
@@ -389,7 +438,7 @@ app.get('/health', (_req, res) => res.status(200).json({ ok: true, bot: '@Test01
     { command: 'help', description: 'Yordam' },
     { command: 'done', description: 'Fayllarni qayta ishlashni boshlash' },
     { command: 'cancel', description: 'Amalni bekor qilish' }
-  ]).catch(console.error);
+  ]).catch((err) => console.error(`setMyCommands error: ${cleanError(err)}`));
   bot.launch({ dropPendingUpdates: true });
   console.log('@Test01uzbot started');
 })();
